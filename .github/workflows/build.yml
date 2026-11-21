@@ -1,0 +1,77 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld make unzip zip curl xz-utils
+          clang --version
+          ld64.lld --version || true
+
+      - name: unzip source
+        run: |
+          ls -la
+          for f in *.zip; do
+            if [ -f "$f" ]; then echo "== $f"; unzip -o -q "$f"; fi
+          done
+          ls -la
+          test -f Makefile
+
+      - name: ios sdk
+        run: |
+          curl -L --retry 3 -o /tmp/sdk.tar.xz \
+            https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
+          ls -lh /tmp/sdk.tar.xz
+          mkdir -p "$HOME/sdk"
+          tar -xJf /tmp/sdk.tar.xz -C "$HOME/sdk"
+          ls "$HOME/sdk"
+
+      - name: imgui
+        run: git clone --depth 1 --branch v1.90.9 https://github.com/ocornut/imgui.git imgui
+
+      - name: compile
+        run: |
+          SDK="$HOME/sdk/iPhoneOS16.5.sdk"
+          FLAGS="-target arm64-apple-ios15.0 -isysroot $SDK -fobjc-arc -std=c++17 -O2 -Iimgui -Iimgui/backends -Isrc -Wno-deprecated-declarations"
+          mkdir -p obj
+          fail=0
+          for f in src/*.mm; do
+            echo "===== $f"
+            if ! clang++ $FLAGS -c "$f" -o "obj/$(basename "$f").o"; then fail=1; fi
+          done
+          for f in imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_metal.mm; do
+            echo "===== $f"
+            if ! clang++ $FLAGS -c "$f" -o "obj/$(basename "$f").o"; then fail=1; fi
+          done
+          echo "----- obj -----"
+          ls -la obj
+          echo "fail=$fail"
+          test $fail -eq 0
+
+      - name: link
+        run: |
+          SDK="$HOME/sdk/iPhoneOS16.5.sdk"
+          clang++ -target arm64-apple-ios15.0 -isysroot "$SDK" \
+            -fuse-ld=lld -dynamiclib \
+            -arch arm64 -platform_version ios 15.0 16.5 \
+            -install_name @executable_path/AUGLike.dylib \
+            -framework UIKit -framework Foundation -framework Metal -framework MetalKit -framework QuartzCore \
+            -undefined dynamic_lookup \
+            -o AUGLike.dylib obj/*.o
+          ls -lh AUGLike.dylib
+          file AUGLike.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUGLike-dylib
+          path: AUGLike.dylib
+          if-no-files-found: error
